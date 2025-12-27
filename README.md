@@ -45,3 +45,70 @@ A complete implementation of a 32-bit 5-stage pipelined RISC-V processor support
 - **Pipeline Efficiency**: Verified through waveform analysis
 
 ## 📁 Project Structure
+riscv-pipeline-processor/
+├── src/
+│ ├── PipelinedProcessor.v # Top-level module
+│ ├── pc_register.v # Program counter
+│ ├── inst_memory.v # Instruction memory
+│ ├── control_unit.v # Main control unit
+│ ├── regfile.v # 32x32 register file
+│ ├── alu_unit.v # ALU with 8 operations
+│ ├── alu_control.v # ALU control logic
+│ ├── imm_gen.v # Immediate generator
+│ ├── HazardDetectionUnit.v # Hazard detection
+│ ├── ForwardingUnit.v # Forwarding logic
+│ ├── pipeline_registers/ # IF/ID, ID/EX, EX/MEM, MEM/WB
+│ └── data_memory.v # Data memory
+├── testbench/
+│ ├── PipelinedProcessor_tb.v # Main testbench
+│ └── test_program.hex # Sample test program
+├── docs/
+│ ├── Final_Report.pdf # Complete project report
+│ └── waveforms/ # Simulation waveforms
+└── README.md # This file
+
+
+## 🧪 Verification & Testing
+### Test Programs
+The processor was validated using comprehensive test programs covering:
+1. **Basic Arithmetic** - R-type operations (add, sub, and, or)
+2. **Immediate Operations** - I-type instructions (addi, xori)
+3. **Memory Access** - Load/store operations (lw, sw)
+4. **Control Flow** - Branch and jump instructions (beq, jal)
+5. **Hazard Scenarios** - Data dependencies and forwarding verification
+
+### Simulation Results
+- **Waveform Analysis**: Verified pipeline flow, forwarding, and hazard handling
+- **CPI Calculation**: Achieved 1.9 CPI for mixed workload
+- **Functional Verification**: All 28+ instructions executed correctly
+
+## 📊 Performance Analysis
+| Metric | Value |
+|--------|-------|
+| Total Instructions | 10 |
+| Total Cycles | 19 |
+| CPI | 1.9 |
+| Max Frequency | 4 GHz (assumed) |
+| Pipeline Stages | 5 |
+| Supported Instructions | 28+ |
+
+## 🚀 Getting Started
+### Prerequisites
+- Verilog simulator (ModelSim/QuestaSim recommended)
+- Basic understanding of RISC-V ISA and pipelining concepts
+
+### Simulation
+1. Clone the repository
+2. Compile all Verilog files in ModelSim
+3. Load the testbench (`PipelinedProcessor_tb.v`)
+4. Run simulation for 1000ns
+5. View waveforms for pipeline verification
+
+### Test Program Example
+```assembly
+# Sample test program
+add x3, x2, x1    # x3 = x2 + x1
+sub x4, x2, x3    # x4 = x2 - x3
+and x5, x3, x4    # x5 = x3 & x4
+lw x9, 12(x2)     # Load from memory
+beq x4, x3, 8     # Branch instruction
