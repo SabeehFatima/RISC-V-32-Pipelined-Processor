@@ -1,0 +1,871 @@
+// =====================================================//
+// 32-bit 5-Stage Pipelined RISC-V Processor            //
+// =====================================================//
+module pc_register (
+    input wire clock,
+    input wire reset,
+    input wire [31:0] next_pc,
+    output reg [31:0] current_pc
+);
+    always @(posedge clock or posedge reset) begin
+        if (reset) begin
+            current_pc <= 32'd0;
+        end else begin
+            current_pc <= next_pc;
+        end
+    end
+endmodule
+
+module mux_pc_src (
+    input wire [31:0] pc_plus_4,
+    input wire [31:0] branch_pc,
+    input wire branch_taken,    
+    output wire [31:0] next_pc
+);
+    assign next_pc = branch_taken ? branch_pc : pc_plus_4;
+endmodule
+
+module inst_memory (
+    input wire reset,
+    input wire clock,
+    input wire [31:0] addr,
+    output wire [31:0] instruction
+);
+    reg [31:0] memory_array [0:63];
+    integer i;
+
+    assign instruction = memory_array[addr[31:2]]; // Word-addressed
+
+    always @(posedge clock or posedge reset) begin
+        if (reset) begin
+            for (i = 0; i < 64; i = i + 1) begin
+                memory_array[i] <= 32'd0;
+            end
+        // Test Program (RISC-V Assembly)
+            memory_array[0]  <= 32'b0000000_00001_00010_000_00011_0110011;  // add x3, x2, x1
+            memory_array[1]  <= 32'b0100000_00011_00010_000_00100_0110011;   // sub x4, x2, x3
+            memory_array[2]  <= 32'b0000000_00100_00011_111_00101_0110011;   // and x5, x3, x4
+            memory_array[3]  <= 32'b0000000_00101_00100_110_00110_0110011;   // or x6, x4, x5
+            memory_array[4]  <= 32'b000000000101_00010_000_00111_0010011;    // addi x7, x2, 5
+            memory_array[5]  <= 32'b000000000011_00011_100_01000_0010011;    // xori x8, x3, 3
+            memory_array[6]  <= 32'b000000001100_00010_010_01001_0000011;    // lw x9, 12(x2)
+            memory_array[7]  <= 32'b0000000_01001_00011_010_01100_0100011;   // sw x9, 12(x3)
+            memory_array[8]  <= 32'b0_000000_00011_00100_000_0100_0_1100011; // beq x4, x3, 8
+            memory_array[9]  <= 32'b0_0000000001_0_0000000100_01010_1101111; // jal x10, 8
+          end
+    end
+endmodule
+
+module IF_ID(
+    input [31:0] PC_Out_IF,
+    output reg [31:0] PC_Out_ID,
+    input [31:0] inst_out_IF,
+    output reg [31:0] inst_out_ID,
+    input reset,
+    input clk,
+    input IFIDWrite
+);
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            PC_Out_ID <= 32'd0;
+            inst_out_ID <= 32'd0;
+        end
+        else if (IFIDWrite) begin
+            PC_Out_ID <= PC_Out_IF;
+            inst_out_ID <= inst_out_IF;
+        end
+    end
+endmodule
+
+module HazardDetectionUnit(
+    input wire MemRead_IDEX,             
+    input wire [4:0] RegisterRd_IDEX,    
+    input wire [4:0] RegisterRs_IFID,    
+    input wire [4:0] RegisterRt_IFID,    
+    output reg PCWrite,                   
+    output reg IFIDWrite,                 
+    output reg ControlMuxSel              
+);
+    always @(*) begin
+        PCWrite = 1'b1;
+        IFIDWrite = 1'b1;
+        ControlMuxSel = 1'b0; 
+       
+        if (MemRead_IDEX && 
+           ((RegisterRd_IDEX == RegisterRs_IFID) || (RegisterRd_IDEX == RegisterRt_IFID))) begin
+            PCWrite = 1'b0;
+            IFIDWrite = 1'b0;
+            ControlMuxSel = 1'b1;
+        end
+    end
+endmodule
+
+module control_unit (
+    input wire [6:0] opcode,
+    output reg reg_write,
+    output reg mem_read,
+    output reg mem_write,
+    output reg mem_to_reg,
+    output reg alu_src,
+    output reg branch,
+    output reg [1:0] alu_op
+);
+    always @(*) begin
+        // Default values
+        reg_write = 1'b0;
+        mem_read = 1'b0;
+        mem_write = 1'b0;
+        mem_to_reg = 1'b0;
+        alu_src = 1'b0;
+        branch = 1'b0;
+        alu_op = 2'b00;
+
+        case (opcode)
+            7'b0110011: begin // R-type
+                reg_write = 1'b1;
+                alu_op = 2'b10;
+            end
+            7'b0010011: begin // I-type
+                reg_write = 1'b1;
+                alu_src = 1'b1;
+                alu_op = 2'b10;
+            end
+            7'b0000011: begin // Load
+                reg_write = 1'b1;
+                mem_read = 1'b1;
+                mem_to_reg = 1'b1;
+                alu_src = 1'b1;
+            end
+            7'b0100011: begin // Store
+                mem_write = 1'b1;
+                alu_src = 1'b1;
+            end
+            7'b1100011: begin // Branch
+                branch = 1'b1;
+                alu_op = 2'b01;
+            end
+            7'b1101111: begin // JAL
+                reg_write = 1'b1;
+            end
+        endcase
+    end
+endmodule
+
+module regfile (
+    input wire clock,
+    input wire reset,
+    input wire reg_write_enable,
+    input wire [4:0] rs1_addr,
+    input wire [4:0] rs2_addr,
+    input wire [4:0] rd_addr,
+    input wire [31:0] write_data,
+    output reg [31:0] rs1_data,
+    output reg [31:0] rs2_data
+);
+    reg [31:0] registers [0:31];
+    integer k;
+
+    // Initialize register file
+    initial begin
+        for (k = 0; k < 32; k = k + 1) begin
+            registers[k] = 32'd0;
+        end
+        // Initialize some registers for testing
+        registers[1] = 32'd5;   // x1 = 5
+        registers[2] = 32'd10;  // x2 = 10
+        registers[3] = 32'd15;  // x3 = 15
+    end
+
+    always @(posedge clock or posedge reset) begin
+        if (reset) begin
+            for (k = 0; k < 32; k = k + 1) begin
+                registers[k] <= 32'd0;
+            end
+        end else if (reg_write_enable && rd_addr != 5'd0) begin
+            registers[rd_addr] <= write_data;
+        end
+    end
+
+    always @(*) begin
+        rs1_data = registers[rs1_addr];
+        rs2_data = registers[rs2_addr];
+    end
+endmodule
+
+module ID_EX_Register(
+    input clk,
+    input rst,
+    input [31:0] reg_data1_in,
+    input [31:0] reg_data2_in,
+    input [31:0] imm_in,
+    input [4:0] Rd_in,
+    input RegWrite_in,
+    input ALUSrc_in,
+    input branch_in,
+    input [1:0] ALUOp_in,
+    input MemRead_in,
+    input MemWrite_in,
+    input MemToReg_in,
+    input [31:0] PC_Out_ID_in,
+    input [31:0] inst_out_ID_in,
+    output reg [31:0] reg_data1_out,
+    output reg [31:0] reg_data2_out,
+    output reg [31:0] imm_out,
+    output reg [4:0] Rd_out,
+    output reg RegWrite_out,
+    output reg ALUSrc_out,
+    output reg branch_out,
+    output reg [1:0] ALUOp_out,
+    output reg MemRead_out,
+    output reg MemWrite_out,
+    output reg MemToReg_out,
+    output reg [31:0] PC_Out_ID_out,
+    output reg [31:0] inst_out_ID_out
+);
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            reg_data1_out <= 32'd0;
+            reg_data2_out <= 32'd0;
+            imm_out <= 32'd0;
+            Rd_out <= 5'd0;
+            RegWrite_out <= 1'b0;
+            ALUSrc_out <= 1'b0;
+            branch_out <= 1'b0;
+            ALUOp_out <= 2'b00;
+            MemRead_out <= 1'b0;
+            MemWrite_out <= 1'b0;
+            MemToReg_out <= 1'b0;
+            PC_Out_ID_out <= 32'd0;
+            inst_out_ID_out <= 32'd0;
+        end else begin
+            reg_data1_out <= reg_data1_in;
+            reg_data2_out <= reg_data2_in;
+            imm_out <= imm_in;
+            Rd_out <= Rd_in;
+            RegWrite_out <= RegWrite_in;
+            ALUSrc_out <= ALUSrc_in;
+            branch_out <= branch_in;
+            ALUOp_out <= ALUOp_in;
+            MemRead_out <= MemRead_in;
+            MemWrite_out <= MemWrite_in;
+            MemToReg_out <= MemToReg_in;
+            PC_Out_ID_out <= PC_Out_ID_in;
+            inst_out_ID_out <= inst_out_ID_in;
+        end
+    end
+endmodule
+
+module mux_alu_src (
+    input wire [31:0] reg2,
+    input wire [31:0] imm,
+    input wire alu_src,
+    output wire [31:0] alu_input_b
+);
+    assign alu_input_b = alu_src ? imm : reg2;
+endmodule
+
+module alu_control (
+    input [1:0] alu_op,
+    input [2:0] funct3,
+    input [6:0] funct7,
+    output reg [3:0] alu_ctrl
+);
+    always @(*) begin
+        case (alu_op)
+            2'b00: alu_ctrl = 4'b0000; // lw/sw (add)
+            2'b01: alu_ctrl = 4'b0001; // branch (sub)
+            2'b10: begin // R-type/I-type
+                case (funct3)
+                    3'b000: alu_ctrl = (funct7[5]) ? 4'b0001 : 4'b0000; // add/sub
+                    3'b001: alu_ctrl = 4'b0101; // sll
+                    3'b010: alu_ctrl = 4'b1000; // slt
+                    3'b100: alu_ctrl = 4'b0100; // xor
+                    3'b110: alu_ctrl = 4'b0011; // or
+                    3'b111: alu_ctrl = 4'b0010; // and
+                    default: alu_ctrl = 4'b0000;
+                endcase
+            end
+            default: alu_ctrl = 4'b0000;
+        endcase
+    end
+endmodule
+
+module alu_unit (
+    input wire [31:0] operand_a,
+    input wire [31:0] operand_b,
+    input wire [3:0] alu_ctrl,
+    output reg [31:0] alu_result,
+    output reg zero_flag
+);
+    always @(*) 
+       begin
+        case (alu_ctrl)
+            4'b0000: alu_result = operand_a + operand_b; // ADD
+            4'b0001: alu_result = operand_a - operand_b; // SUB
+            4'b0010: alu_result = operand_a & operand_b; // AND
+            4'b0011: alu_result = operand_a | operand_b; // OR
+            4'b0100: alu_result = operand_a ^ operand_b; // XOR
+            4'b0101: alu_result = operand_a << operand_b[4:0]; // SLL
+            default: alu_result = 32'd0;
+        endcase
+        zero_flag = (alu_result == 32'd0);
+    end
+endmodule
+
+module mux_forwarding (
+    input wire [31:0] reg_val,
+    input wire [31:0] forward_data_mem,
+    input wire [31:0] forward_data_wb,
+    input wire [1:0] forward_sel,
+    output wire [31:0] alu_input
+);
+    assign alu_input = (forward_sel == 2'b00) ? reg_val :
+                       (forward_sel == 2'b01) ? forward_data_wb :
+                       (forward_sel == 2'b10) ? forward_data_mem :
+                       reg_val;
+endmodule
+
+module ForwardingUnit(
+    input [4:0] Rs1_IDEX,
+    input [4:0] Rs2_IDEX,
+    input [4:0] Rd_EXMEM,
+    input [4:0] Rd_MEMWB,
+    input RegWrite_EXMEM,
+    input RegWrite_MEMWB,
+    output reg [1:0] ForwardA,
+    output reg [1:0] ForwardB
+);
+    always @(*) begin
+        ForwardA = 2'b00;
+        ForwardB = 2'b00;
+
+        // EX Hazard (ALU ? ALU)
+        if (RegWrite_EXMEM && (Rd_EXMEM != 5'd0) && (Rd_EXMEM == Rs1_IDEX))
+        begin
+            ForwardA = 2'b10;
+        end
+        if (RegWrite_EXMEM && (Rd_EXMEM != 5'd0) && (Rd_EXMEM == Rs2_IDEX)) 
+        begin
+            ForwardB = 2'b10;
+        end
+
+        // MEM Hazard (MEM ? ALU)
+        if (RegWrite_MEMWB && (Rd_MEMWB != 5'd0) && (Rd_MEMWB == Rs1_IDEX) &&
+           !(RegWrite_EXMEM && (Rd_EXMEM != 5'd0) && (Rd_EXMEM == Rs1_IDEX)))
+       begin
+            ForwardA = 2'b01;
+        end
+
+        if (RegWrite_MEMWB && (Rd_MEMWB != 5'd0) && (Rd_MEMWB == Rs2_IDEX) &&
+           !(RegWrite_EXMEM && (Rd_EXMEM != 5'd0) && (Rd_EXMEM == Rs2_IDEX)))
+       begin
+            ForwardB = 2'b01;
+        end
+    end
+endmodule
+
+module EX_MEM_Register(
+    input clk,
+    input rst,
+    input [31:0] alu_result_in,
+    input [31:0] read_data2_in,
+    input MemRead_in,
+    input MemWrite_in,
+    input MemToReg_in,
+    input RegWrite_in,
+    input [4:0] Rd_in,
+    input branch_in,
+    input [31:0] branch_target_address_in,
+    output reg [31:0] alu_result_out,
+    output reg [31:0] read_data2_out,
+    output reg MemRead_out,
+    output reg MemWrite_out,
+    output reg MemToReg_out,
+    output reg RegWrite_out,
+    output reg [4:0] Rd_out,
+    output reg branch_out,
+    output reg [31:0] branch_target_address_out
+);
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            alu_result_out <= 32'd0;
+            read_data2_out <= 32'd0;
+            MemRead_out <= 1'b0;
+            MemWrite_out <= 1'b0;
+            MemToReg_out <= 1'b0;
+            RegWrite_out <= 1'b0;
+            Rd_out <= 5'd0;
+            branch_out <= 1'b0;
+            branch_target_address_out <= 32'd0;
+        end else begin
+            alu_result_out <= alu_result_in;
+            read_data2_out <= read_data2_in;
+            MemRead_out <= MemRead_in;
+            MemWrite_out <= MemWrite_in;
+            MemToReg_out <= MemToReg_in;
+            RegWrite_out <= RegWrite_in;
+            Rd_out <= Rd_in;
+            branch_out <= branch_in;
+            branch_target_address_out <= branch_target_address_in;
+        end
+    end
+endmodule
+
+module data_memory (
+    input wire clock,
+    input wire reset,
+    input wire mem_read,
+    input wire mem_write,
+    input wire [31:0] addr,
+    input wire [31:0] write_data,
+    output reg [31:0] read_data
+);
+    reg [31:0] mem_array [0:63];
+    integer m;
+
+    always @(posedge clock or posedge reset) begin
+        if (reset) begin
+            for (m = 0; m < 64; m = m + 1) begin
+                mem_array[m] <= 32'd0;
+            end
+            // Initialize some memory locations for testing
+            mem_array[12] <= 32'd42;  // Address 12 = 42
+        end else if (mem_write) begin
+            mem_array[addr[31:2]] <= write_data;
+        end
+    end
+
+    always @(*) begin
+        if (mem_read) begin
+            read_data = mem_array[addr[31:2]];
+        end else begin
+            read_data = 32'd0;
+        end
+    end
+endmodule
+
+module mux_mem_to_reg (
+    input wire [31:0] alu_result,
+    input wire [31:0] mem_data,
+    input wire mem_to_reg,
+    output wire [31:0] write_back_data
+);
+    assign write_back_data = mem_to_reg ? mem_data : alu_result;
+endmodule
+
+module MEM_WB_Register(
+    input clk,
+    input rst,
+    input [31:0] read_data_in,
+    input [31:0] alu_result_in,
+    input RegWrite_in,
+    input MemToReg_in,
+    input [4:0] Rd_in,
+    output reg [31:0] read_data_out,
+    output reg [31:0] alu_result_out,
+    output reg RegWrite_out,
+    output reg MemToReg_out,
+    output reg [4:0] Rd_out
+);
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            read_data_out <= 32'd0;
+            alu_result_out <= 32'd0;
+            RegWrite_out <= 1'b0;
+            MemToReg_out <= 1'b0;
+            Rd_out <= 5'd0;
+        end else begin
+            read_data_out <= read_data_in;
+            alu_result_out <= alu_result_in;
+            RegWrite_out <= RegWrite_in;
+            MemToReg_out <= MemToReg_in;
+            Rd_out <= Rd_in;
+        end
+    end
+endmodule
+
+module imm_gen (
+    input [31:0] instruction,
+    output reg [31:0] imm_ext
+);
+    always @(*) begin
+        case (instruction[6:0])
+            7'b0010011, 7'b0000011: // I-type
+                imm_ext = {{20{instruction[31]}}, instruction[31:20]};
+            7'b0100011: // S-type
+                imm_ext = {{20{instruction[31]}}, instruction[31:25], instruction[11:7]};
+            7'b1100011: // B-type
+                imm_ext = {{20{instruction[31]}}, instruction[7], instruction[30:25], instruction[11:8], 1'b0};
+            7'b1101111: // J-type
+                imm_ext = {{12{instruction[31]}}, instruction[19:12], instruction[20], instruction[30:21], 1'b0};
+            default:
+                imm_ext = 32'd0;
+        endcase
+    end
+endmodule
+
+module PipelinedProcessor (
+    input wire clk,
+    input wire reset
+);
+    // IF Stage Signals
+    wire [31:0] pc_plus_4;
+    wire [31:0] branch_pc;
+    reg branch_taken;
+    wire [31:0] next_pc;
+    wire [31:0] current_pc;
+    wire [31:0] instruction;
+    
+    // IF/ID Pipeline Registers
+    wire [31:0] PC_IF_ID;
+    wire [31:0] inst_IF_ID;
+    
+    // ID Stage Signals
+    wire [31:0] rs1_data, rs2_data;
+    wire [31:0] imm_ext;
+    wire RegWrite, MemRead, MemWrite, MemToReg, ALUSrc, Branch;
+    wire [1:0] ALUOp;
+    
+    // Hazard Detection
+    wire PCWrite, IFIDWrite, ControlMuxSel;
+    
+    // ID/EX Pipeline Registers
+    wire [31:0] reg_data1, reg_data2;
+    wire [31:0] imm_IDEX;
+    wire [4:0] Rd_IDEX;
+    wire RegWrite_IDEX, ALUSrc_IDEX, branch_IDEX;
+    wire [1:0] ALUOp_IDEX;
+    wire MemRead_IDEX, MemWrite_IDEX, MemToReg_IDEX;
+    wire [31:0] PC_IDEX;
+    wire [31:0] inst_IDEX;
+    
+    // EX Stage Signals
+    wire [31:0] alu_result;
+    wire zero_flag;
+    wire [3:0] alu_ctrl;
+    wire [1:0] ForwardA, ForwardB;
+    wire [31:0] alu_input_a, alu_input_b, alu_input_b_final;
+    wire [31:0] branch_target_address;
+    
+    // EX/MEM Pipeline Registers
+    wire MemRead_EXMEM, MemWrite_EXMEM, MemToReg_EXMEM, RegWrite_EXMEM, branch_EXMEM;
+    wire [31:0] alu_result_EXMEM;
+    wire [31:0] reg_data2_EXMEM;
+    wire [4:0] Rd_EXMEM;
+    wire [31:0] branch_target_address_EXMEM;
+    
+    // MEM Stage Signals
+    wire [31:0] read_data_MEM;
+    
+    // MEM/WB Pipeline Registers
+    wire RegWrite_MEMWB, MemToReg_MEMWB;
+    wire [31:0] read_data_MEMWB, alu_result_MEMWB;
+    wire [4:0] Rd_MEMWB;
+    
+    // WB Stage Signals
+    wire [31:0] write_back_data;
+    
+    // PC Logic
+    assign pc_plus_4 = current_pc + 32'd4;
+    
+    // Initialize branch_taken
+    initial begin
+        branch_taken = 1'b0;
+    end
+    
+    // Calculate branch_pc
+    assign branch_pc = branch_target_address_EXMEM;
+    
+    // Instantiate PC register
+    pc_register pc_reg(
+        .clock(clk),
+        .reset(reset),
+        .next_pc(next_pc),
+        .current_pc(current_pc)
+    );
+    
+    // Mux for PC source
+    mux_pc_src mux_pc(
+        .pc_plus_4(pc_plus_4),
+        .branch_pc(branch_pc),
+        .branch_taken(branch_taken),
+        .next_pc(next_pc)
+    );
+    
+    // Instruction Memory
+    inst_memory imem(
+        .reset(reset),
+        .clock(clk),
+        .addr(current_pc),
+        .instruction(instruction)
+    );
+    
+    // IF/ID Pipeline Register
+    IF_ID if_id_reg(
+        .PC_Out_IF(current_pc),
+        .PC_Out_ID(PC_IF_ID),
+        .inst_out_IF(instruction),
+        .inst_out_ID(inst_IF_ID),
+        .reset(reset),
+        .clk(clk),
+        .IFIDWrite(IFIDWrite)
+    );
+    
+    // Control Unit
+    control_unit ctrl_unit(
+        .opcode(inst_IF_ID[6:0]),
+        .reg_write(RegWrite),
+        .mem_read(MemRead),
+        .mem_write(MemWrite),
+        .mem_to_reg(MemToReg),
+        .alu_src(ALUSrc),
+        .branch(Branch),
+        .alu_op(ALUOp)
+    );
+    
+    // Immediate Generator
+    imm_gen imm_gen_unit(
+        .instruction(inst_IF_ID),
+        .imm_ext(imm_ext)
+    );
+    
+    // Register File
+    regfile reg_file(
+        .clock(clk),
+        .reset(reset),
+        .reg_write_enable(RegWrite_MEMWB),
+        .rs1_addr(inst_IF_ID[19:15]),
+        .rs2_addr(inst_IF_ID[24:20]),
+        .rd_addr(Rd_MEMWB),
+        .write_data(write_back_data),
+        .rs1_data(rs1_data),
+        .rs2_data(rs2_data)
+    );
+    
+    // Hazard Detection Unit
+    HazardDetectionUnit hazard_det(
+        .MemRead_IDEX(MemRead_IDEX),
+        .RegisterRd_IDEX(Rd_IDEX),
+        .RegisterRs_IFID(inst_IF_ID[19:15]),
+        .RegisterRt_IFID(inst_IF_ID[24:20]),
+        .PCWrite(PCWrite),
+        .IFIDWrite(IFIDWrite),
+        .ControlMuxSel(ControlMuxSel)
+    );
+    
+    // ID/EX Pipeline Register
+    ID_EX_Register id_ex_reg(
+        .clk(clk),
+        .rst(reset),
+        .reg_data1_in(rs1_data),
+        .reg_data2_in(rs2_data),
+        .imm_in(imm_ext),
+        .Rd_in(inst_IF_ID[11:7]),
+        .RegWrite_in(RegWrite),
+        .ALUSrc_in(ALUSrc),
+        .branch_in(Branch),
+        .ALUOp_in(ALUOp),
+        .MemRead_in(MemRead),
+        .MemWrite_in(MemWrite),
+        .MemToReg_in(MemToReg),
+        .PC_Out_ID_in(PC_IF_ID),
+        .inst_out_ID_in(inst_IF_ID),
+        .reg_data1_out(reg_data1),
+        .reg_data2_out(reg_data2),
+        .imm_out(imm_IDEX),
+        .Rd_out(Rd_IDEX),
+        .RegWrite_out(RegWrite_IDEX),
+        .ALUSrc_out(ALUSrc_IDEX),
+        .branch_out(branch_IDEX),
+        .ALUOp_out(ALUOp_IDEX),
+        .MemRead_out(MemRead_IDEX),
+        .MemWrite_out(MemWrite_IDEX),
+        .MemToReg_out(MemToReg_IDEX),
+        .PC_Out_ID_out(PC_IDEX),
+        .inst_out_ID_out(inst_IDEX)
+    );
+    
+    // Forwarding Unit
+    ForwardingUnit forwarding_unit(
+        .Rs1_IDEX(inst_IDEX[19:15]),
+        .Rs2_IDEX(inst_IDEX[24:20]),
+        .Rd_EXMEM(Rd_EXMEM),
+        .Rd_MEMWB(Rd_MEMWB),
+        .RegWrite_EXMEM(RegWrite_EXMEM),
+        .RegWrite_MEMWB(RegWrite_MEMWB),
+        .ForwardA(ForwardA),
+        .ForwardB(ForwardB)
+    );
+    
+    // ALU Control
+    alu_control alu_ctrl_unit(
+        .alu_op(ALUOp_IDEX),
+        .funct3(inst_IDEX[14:12]),
+        .funct7(inst_IDEX[31:25]),
+        .alu_ctrl(alu_ctrl)
+    );
+    
+    // Forwarding MUX for ALU input A
+    mux_forwarding mux_forward_a(
+        .reg_val(reg_data1),
+        .forward_data_mem(alu_result_EXMEM),
+        .forward_data_wb(write_back_data),
+        .forward_sel(ForwardA),
+        .alu_input(alu_input_a)
+    );
+    
+    // Forwarding MUX for ALU input B
+    mux_forwarding mux_forward_b(
+        .reg_val(reg_data2),
+        .forward_data_mem(alu_result_EXMEM),
+        .forward_data_wb(write_back_data),
+        .forward_sel(ForwardB),
+        .alu_input(alu_input_b)
+    );
+    
+    // ALU Source MUX
+    mux_alu_src alu_src_mux(
+        .reg2(alu_input_b),
+        .imm(imm_IDEX),
+        .alu_src(ALUSrc_IDEX),
+        .alu_input_b(alu_input_b_final)
+    );
+    
+    // ALU
+    alu_unit alu(
+        .operand_a(alu_input_a),
+        .operand_b(alu_input_b_final),
+        .alu_ctrl(alu_ctrl),
+        .alu_result(alu_result),
+        .zero_flag(zero_flag)
+    );
+
+    // Calculate branch target address
+    assign branch_target_address = PC_IDEX + (imm_IDEX << 1);
+    
+    // Branch taken logic
+    always @(*) begin
+        branch_taken = branch_EXMEM && zero_flag;
+    end
+
+    // EX/MEM Pipeline Register
+    EX_MEM_Register ex_mem_reg(
+        .clk(clk),
+        .rst(reset),
+        .alu_result_in(alu_result),
+        .read_data2_in(alu_input_b),
+        .MemRead_in(MemRead_IDEX),
+        .MemWrite_in(MemWrite_IDEX),
+        .MemToReg_in(MemToReg_IDEX),
+        .RegWrite_in(RegWrite_IDEX),
+        .Rd_in(Rd_IDEX),
+        .branch_in(branch_IDEX),
+        .branch_target_address_in(branch_target_address),
+        .alu_result_out(alu_result_EXMEM),
+        .read_data2_out(reg_data2_EXMEM),
+        .MemRead_out(MemRead_EXMEM),
+        .MemWrite_out(MemWrite_EXMEM),
+        .MemToReg_out(MemToReg_EXMEM),
+        .RegWrite_out(RegWrite_EXMEM),
+        .Rd_out(Rd_EXMEM),
+        .branch_out(branch_EXMEM),
+        .branch_target_address_out(branch_target_address_EXMEM)
+    );
+
+    // Data Memory
+    data_memory dmem(
+        .clock(clk),
+        .reset(reset),
+        .mem_read(MemRead_EXMEM),
+        .mem_write(MemWrite_EXMEM),
+        .addr(alu_result_EXMEM),
+        .write_data(reg_data2_EXMEM),
+        .read_data(read_data_MEM)
+    );
+
+    // MEM/WB Pipeline Register
+    MEM_WB_Register mem_wb_reg(
+        .clk(clk),
+        .rst(reset),
+        .read_data_in(read_data_MEM),
+        .alu_result_in(alu_result_EXMEM),
+        .RegWrite_in(RegWrite_EXMEM),
+        .MemToReg_in(MemToReg_EXMEM),
+        .Rd_in(Rd_EXMEM),
+        .read_data_out(read_data_MEMWB),
+        .alu_result_out(alu_result_MEMWB),
+        .RegWrite_out(RegWrite_MEMWB),
+        .MemToReg_out(MemToReg_MEMWB),
+        .Rd_out(Rd_MEMWB)
+    );
+
+    // Write-back MUX
+    mux_mem_to_reg wb_mux(
+        .alu_result(alu_result_MEMWB),
+        .mem_data(read_data_MEMWB),
+        .mem_to_reg(MemToReg_MEMWB),
+        .write_back_data(write_back_data)
+    );
+
+endmodule
+
+module PipelinedProcessor_tb;
+
+    // Inputs
+    reg clk;
+    reg reset;
+
+    // Instantiate the Unit Under Test (UUT)
+    PipelinedProcessor uut (
+        .clk(clk),
+        .reset(reset)
+    );
+
+    // Clock generation
+    initial begin
+        clk = 0;
+        forever #5 clk = ~clk; // 10ns period
+    end
+
+    // CPI Tracking
+    integer cycle_count = 0;
+    integer instruction_count = 0;
+    real cpi;
+
+    always @(posedge clk) begin
+        if (!reset) begin
+            cycle_count <= cycle_count + 1;
+            // Count retired instructions (WB stage)
+            if (uut.RegWrite_MEMWB) begin
+                instruction_count <= instruction_count + 1;
+            end
+        end
+    end
+
+    initial begin
+        // Initialize Inputs
+        reset = 1;
+        
+        // Wait for global reset
+        #20;
+        reset = 0;
+        
+        // Monitor pipeline behavior
+        $monitor("Time=%0t PC=%h Instruction=%h ALU_Result=%h RegWrite=%b", 
+                $time, uut.current_pc, uut.instruction, uut.alu_result, uut.RegWrite_MEMWB);
+        
+        // Run for 100 cycles
+        #1000;
+        
+        // Calculate CPI
+        cpi = real'(cycle_count) / real'(instruction_count);
+        $display("CPI = %0.2f", cpi);
+        $finish;
+    end
+    // Waveform dumping
+    initial begin
+        $dumpfile("pipelined_processor.vcd");
+        $dumpvars(0, PipelinedProcessor_tb);
+    end
+endmodule
