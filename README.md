@@ -44,29 +44,6 @@ A complete implementation of a 32-bit 5-stage pipelined RISC-V processor support
 - **Clock Frequency**: Designed for 4 GHz (250ps clock period)
 - **Pipeline Efficiency**: Verified through waveform analysis
 
-## 📁 Project Structure
-riscv-pipeline-processor/
-├── src/
-│ ├── PipelinedProcessor.v # Top-level module
-│ ├── pc_register.v # Program counter
-│ ├── inst_memory.v # Instruction memory
-│ ├── control_unit.v # Main control unit
-│ ├── regfile.v # 32x32 register file
-│ ├── alu_unit.v # ALU with 8 operations
-│ ├── alu_control.v # ALU control logic
-│ ├── imm_gen.v # Immediate generator
-│ ├── HazardDetectionUnit.v # Hazard detection
-│ ├── ForwardingUnit.v # Forwarding logic
-│ ├── pipeline_registers/ # IF/ID, ID/EX, EX/MEM, MEM/WB
-│ └── data_memory.v # Data memory
-├── testbench/
-│ ├── PipelinedProcessor_tb.v # Main testbench
-│ └── test_program.hex # Sample test program
-├── docs/
-│ ├── Final_Report.pdf # Complete project report
-│ └── waveforms/ # Simulation waveforms
-└── README.md # This file
-
 
 ## 🧪 Verification & Testing
 ### Test Programs
